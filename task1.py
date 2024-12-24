@@ -1,145 +1,204 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler, PolynomialFeatures
-from sklearn.decomposition import PCA
-from sklearn.mixture import GaussianMixture
-from sklearn.cluster import AgglomerativeClustering, SpectralClustering
+import seaborn as sns
 from sklearn.metrics import silhouette_score
-from sklearn.random_projection import GaussianRandomProjection
-from scipy import stats
+from sklearn.preprocessing import StandardScaler
+from sklearn.manifold import TSNE
+from umap import UMAP
+from scipy.spatial.distance import pdist, squareform
+from scipy.linalg import eigh
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+from sklearn.neighbors import NearestNeighbors
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import IsolationForest
+from scipy.cluster.hierarchy import dendrogram, linkage
 
 # Load the dataset
+data = pd.read_csv('ClimateDataBasel.csv', header=None)
+
+# Add column names
 columns = [
-    'Temperature (Min)', 'Temperature (Max)', 'Temperature (Mean)',
-    'Relative Humidity (Min)', 'Relative Humidity (Max)', 'Relative Humidity (Mean)',
-    'Sea Level Pressure (Min)', 'Sea Level Pressure (Max)', 'Sea Level Pressure (Mean)',
-    'Precipitation Total', 'Snowfall Amount', 'Sunshine Duration',
-    'Wind Gust (Min)', 'Wind Gust (Max)', 'Wind Gust (Mean)',
-    'Wind Speed (Min)', 'Wind Speed (Max)', 'Wind Speed (Mean)'
+    "Temp_Min", "Temp_Max", "Temp_Mean",
+    "Humidity_Min", "Humidity_Max", "Humidity_Mean",
+    "Pressure_Min", "Pressure_Max", "Pressure_Mean",
+    "Precipitation_Total", "Snowfall_Amount", "Sunshine_Duration",
+    "Wind_Gust_Min", "Wind_Gust_Max", "Wind_Gust_Mean",
+    "Wind_Speed_Min", "Wind_Speed_Max", "Wind_Speed_Mean"
 ]
-data = pd.read_csv('ClimateDataBasel.csv', names=columns)
+data.columns = columns
 
-# Select relevant features
-selected_features = ['Temperature (Mean)', 'Relative Humidity (Mean)', 'Sea Level Pressure (Mean)', 'Wind Speed (Mean)']
-data = data[selected_features]
+# Step 1: Handle Missing Data
+def handle_missing_data(data):
+    print(f"Missing values detected: {data.isnull().sum().sum()}")
+    imputer = SimpleImputer(strategy="mean")
+    return pd.DataFrame(imputer.fit_transform(data), columns=data.columns)
 
-# Step 1: Standardization
-scaler = StandardScaler()
-data_standardized = scaler.fit_transform(data)
+data = handle_missing_data(data)
 
-# Step 2: Fourier Transform for Seasonality Removal
-def remove_seasonality(column):
-    transformed = np.fft.fft(column)
-    transformed[int(len(transformed)/2):] = 0  # Remove high frequencies (seasonal)
-    return np.fft.ifft(transformed).real
+# Step 2: Isolation Forest for Outlier Removal
+def isolation_forest_outlier_removal(data, contamination=0.03):
+    print("Applying Isolation Forest for outlier detection...")
+    iso_forest = IsolationForest(contamination=contamination, random_state=42)
+    predictions = iso_forest.fit_predict(data)
+    print(f"Rows removed due to Isolation Forest outliers: {np.sum(predictions == -1)}")
+    return data[predictions == 1].reset_index(drop=True)
 
-for i, column in enumerate(selected_features):
-    data_standardized[:, i] = remove_seasonality(data_standardized[:, i])
+data = isolation_forest_outlier_removal(data)
 
-# Step 3: Z-score Outlier Removal
-z_scores = np.abs(stats.zscore(data_standardized))
-data_no_outliers = data_standardized[(z_scores < 3).all(axis=1)]
+# Step 3: Feature Selection Using Correlation with Heatmap
+def feature_selection(data, threshold=0.80):
+    print("\nVisualizing Correlation Matrix for Feature Selection...")
+    corr_matrix = data.corr()
+    sns.heatmap(corr_matrix, annot=True, cmap="coolwarm", fmt=".2f", linewidths=0.5)
+    plt.title("Feature Correlation Heatmap")
+    plt.tight_layout()
+    plt.show()
 
-# Step 4: Polynomial Feature Engineering (New)
-poly = PolynomialFeatures(degree=2, interaction_only=True)
-data_poly = poly.fit_transform(data_no_outliers)
+    # Drop highly correlated features
+    upper_triangle = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    to_drop = [column for column in upper_triangle.columns if any(upper_triangle[column] > threshold)]
+    print(f"Features dropped: {to_drop}")
+    return data.drop(columns=to_drop)
 
-# Step 5: PCA for Dimensionality Reduction (New)
-pca = PCA(n_components=4)  # Reducing the dimensionality
-data_pca = pca.fit_transform(data_poly)
+data = feature_selection(data)
 
-# Combine PCA and Gaussian Random Projection for dimensionality reduction
-random_projection = GaussianRandomProjection(n_components=2)
-data_projected = random_projection.fit_transform(data_pca)
+# Step 4: Scaling
+# Step 4: Manual Standard Scaling
+def manual_standard_scaler(data):
+    # Manually implements standard scaling by calculating mean and std deviation
+    # for each column (feature).
 
-# 5.1 Gaussian Mixture Models (GMM)
-print("\n### GMM Clustering ###")
-n_components_values = [3, 4, 5, 6, 7, 8]
-covariance_types = ['full', 'tied', 'diag', 'spherical']
+    means = np.mean(data, axis=0)  # Compute column-wise mean
+    stds = np.std(data, axis=0)    # Compute column-wise standard deviation
+    
+    # Avoid division by zero for any column with zero variance
+    stds[stds == 0] = 1.0  
+    
+    print("Feature-wise Means (Before Scaling):")
+    print(means)
+    print("\nFeature-wise Standard Deviations (Before Scaling):")
+    print(stds)
+    
+    # Standardize the data
+    scaled_data = (data - means) / stds
+    
+    # Validation to check results
+    print("\nFeature-wise Means (After Scaling - Should be close to 0):")
+    print(np.mean(scaled_data, axis=0))
+    print("\nFeature-wise Standard Deviations (After Scaling - Should be close to 1):")
+    print(np.std(scaled_data, axis=0))
+    
+    return scaled_data
+# Apply the manual scaler
+scaled_data = manual_standard_scaler(data)
 
-best_silhouette_gmm = -1
-best_n_components_gmm = None
-best_covariance_gmm = None
+# Step 5: Dimensionality Reduction with t-SNE or UMAP
+def apply_umap(data, n_components=2):
+    umap_reducer = UMAP(n_components=n_components, random_state=42, n_neighbors=15, min_dist=0.1)
+    reduced_data = umap_reducer.fit_transform(data)
+    print(f"UMAP Reduction Completed with {n_components} Components")
+    return reduced_data
 
-for n_components in n_components_values:
-    for cov_type in covariance_types:
-        gmm = GaussianMixture(n_components=n_components, covariance_type=cov_type)
-        labels_gmm = gmm.fit_predict(data_projected)
-        silhouette = silhouette_score(data_projected, labels_gmm)
-        
-        if silhouette > best_silhouette_gmm:
-            best_silhouette_gmm = silhouette
-            best_n_components_gmm = n_components
-            best_covariance_gmm = cov_type
+# UMAP applied 
+reduced_data = apply_umap(scaled_data)  # Uncomment for UMAP
 
-print(f"Best GMM Silhouette Score: {best_silhouette_gmm}, Components: {best_n_components_gmm}, Covariance Type: {best_covariance_gmm}")
-gmm = GaussianMixture(n_components=best_n_components_gmm, covariance_type=best_covariance_gmm)
-labels_gmm = gmm.fit_predict(data_projected)
-plt.figure()
-plt.scatter(data_projected[:, 0], data_projected[:, 1], c=labels_gmm, cmap='plasma', s=50)
-plt.title(f'GMM Clustering (Components: {best_n_components_gmm}, Covariance: {best_covariance_gmm})')
+# Generate the linkage matrix using the 'ward' method
+linkage_matrix = linkage(reduced_data, method='ward')
+
+# Plot the dendrogram
+plt.figure(figsize=(12, 8))
+dendrogram(linkage_matrix, truncate_mode='level', p=5)  # 'p=5' limits the depth to visualize
+plt.title("Dendrogram for Agglomerative Clustering")
+plt.xlabel("Cluster Index")
+plt.ylabel("Distance")
 plt.show()
 
-# 5.2 Spectral Clustering
-print("\n### Spectral Clustering ###")
-affinities = ['nearest_neighbors', 'rbf']
-n_neighbors_values = [15, 20, 25, 30]
-gamma_values = [0.01, 0.1, 1, 5, 10, 20]
+# Step 6: Spectral Clustering Optimization
+def optimize_spectral_clustering(data):
+    print("\nOptimizing Spectral Clustering...")
+    best_score = -1
+    best_labels = None
+    for clusters in range(2, 10):  # Test multiple cluster numbers
+        for gamma in np.linspace(0.5, 2.0, 5):  # Test different gamma values
+            similarity_matrix = np.exp(-gamma * squareform(pdist(data))**2)
+            laplacian = np.diag(similarity_matrix.sum(axis=1)) - similarity_matrix
+            eigvals, eigvecs = eigh(laplacian)
+            spectral_embedding = eigvecs[:, 1:clusters + 1]
+            labels = KMeans(n_clusters=clusters, random_state=42).fit_predict(spectral_embedding)
+            score = silhouette_score(data, labels)
+            if score > best_score:
+                best_score = score
+                best_labels = labels
+    print(f"Spectral Clustering: Best Silhouette = {best_score:.4f}")
+    return best_labels
 
-best_silhouette_spectral = -1
-best_params_spectral = None
+labels_spectral = optimize_spectral_clustering(reduced_data)
 
-for affinity in affinities:
-    if affinity == 'nearest_neighbors':
-        for n_neighbors in n_neighbors_values:
-            spectral = SpectralClustering(n_clusters=4, affinity=affinity, n_neighbors=n_neighbors)
-            labels_spectral = spectral.fit_predict(data_projected)
-            silhouette = silhouette_score(data_projected, labels_spectral)
-            if silhouette > best_silhouette_spectral:
-                best_silhouette_spectral = silhouette
-                best_params_spectral = (affinity, n_neighbors)
+# Step 7: DBSCAN
+def dbscan(data, eps_range=(0.1, 1.5), min_samples_range=(5, 30), num_eps_values=100):
+    best_silhouette = -1
+    best_labels = None
+    best_eps = None
+    best_min_samples = None
+    print("Optimizing DBSCAN Parameters...")
+    for min_samples in range(min_samples_range[0], min_samples_range[1], 5):
+        nbrs = NearestNeighbors(n_neighbors=min_samples).fit(data)
+        distances, _ = nbrs.kneighbors(data)
+        distances = np.sort(distances[:, -1])
+        eps_values = np.linspace(eps_range[0], eps_range[1], num_eps_values)
+        for eps in eps_values:
+            dbscan = DBSCAN(eps=eps, min_samples=min_samples)
+            labels = dbscan.fit_predict(data)
+            valid_labels = labels != -1
+            if np.sum(valid_labels) > 1 and len(np.unique(labels[valid_labels])) > 1:
+                silhouette = silhouette_score(data[valid_labels], labels[valid_labels])
+                if silhouette > best_silhouette:
+                    best_silhouette = silhouette
+                    best_labels = labels
+                    best_eps = eps
+                    best_min_samples = min_samples
+    if best_labels is not None:
+        print(f"Best DBSCAN Results: Min Samples = {best_min_samples}, Eps = {best_eps:.4f}, Silhouette Score = {best_silhouette:.4f}")
     else:
-        for gamma in gamma_values:
-            spectral = SpectralClustering(n_clusters=4, affinity=affinity, gamma=gamma)
-            labels_spectral = spectral.fit_predict(data_projected)
-            silhouette = silhouette_score(data_projected, labels_spectral)
-            if silhouette > best_silhouette_spectral:
-                best_silhouette_spectral = silhouette
-                best_params_spectral = (affinity, gamma)
+        print("DBSCAN failed to produce meaningful clusters.")
+    return best_labels
 
-print(f"Best Spectral Clustering Silhouette Score: {best_silhouette_spectral}, Params: {best_params_spectral}")
-if best_params_spectral[0] == 'nearest_neighbors':
-    spectral = SpectralClustering(n_clusters=4, affinity=best_params_spectral[0], n_neighbors=best_params_spectral[1])
-else:
-    spectral = SpectralClustering(n_clusters=4, affinity=best_params_spectral[0], gamma=best_params_spectral[1])
-labels_spectral = spectral.fit_predict(data_projected)
+labels_dbscan = dbscan(reduced_data)
+
+# Step 8: Agglomerative Clustering Optimization
+def optimize_agglomerative_clustering(data):
+    print("\nOptimizing Agglomerative Clustering...")
+    best_score = -1
+    best_labels = None
+    for clusters in range(2, 10):  # Test different numbers of clusters
+        for linkage in ['ward', 'average', 'complete']:  # Test different linkage methods
+            model = AgglomerativeClustering(n_clusters=clusters, linkage=linkage)
+            labels = model.fit_predict(data)
+            score = silhouette_score(data, labels)
+            if score > best_score:
+                best_score = score
+                best_labels = labels
+    print(f"Agglomerative Clustering: Best Silhouette = {best_score:.4f}")
+    return best_labels
+
+labels_agg = optimize_agglomerative_clustering(reduced_data)
+
+# Step 9: Visualization with Centroids
+def plot_clusters_with_centroids(data, labels, title):
+    unique_labels = np.unique(labels)
+    centroids = np.array([data[labels == label].mean(axis=0) for label in unique_labels if label != -1])
+    plt.scatter(data[:, 0], data[:, 1], c=labels, cmap='viridis', s=10, alpha=0.8)
+    plt.scatter(centroids[:, 0], centroids[:, 1], c='red', s=100, marker='X', label='Centroids')
+    plt.title(title)
+    plt.colorbar()
+    plt.legend()
+    plt.show()
+
+# Visualize results
 plt.figure()
-plt.scatter(data_projected[:, 0], data_projected[:, 1], c=labels_spectral, cmap='coolwarm', s=50)
-plt.title(f'Spectral Clustering (Params: {best_params_spectral})')
-plt.show()
-
-# 5.3 Agglomerative Clustering
-print("\n### Agglomerative Clustering ###")
-linkages = ['ward', 'complete', 'average', 'single']
-n_clusters_values = [3, 4, 5, 6]
-best_silhouette_agg = -1
-best_linkage = None
-
-for linkage in linkages:
-    for n_clusters in n_clusters_values:
-        agg_clustering = AgglomerativeClustering(n_clusters=n_clusters, linkage=linkage)
-        labels_agg = agg_clustering.fit_predict(data_projected)
-        silhouette = silhouette_score(data_projected, labels_agg)
-        
-        if silhouette > best_silhouette_agg:
-            best_silhouette_agg = silhouette
-            best_linkage = (linkage, n_clusters)
-
-print(f"Best Agglomerative Clustering Silhouette Score: {best_silhouette_agg}, Linkage: {best_linkage[0]}, Clusters: {best_linkage[1]}")
-agg_clustering = AgglomerativeClustering(n_clusters=best_linkage[1], linkage=best_linkage[0])
-labels_agg = agg_clustering.fit_predict(data_projected)
+plot_clusters_with_centroids(reduced_data, labels_spectral, "Optimized Spectral Clustering")
 plt.figure()
-plt.scatter(data_projected[:, 0], data_projected[:, 1], c=labels_agg, cmap='viridis', s=50)
-plt.title(f'Agglomerative Clustering (Best Linkage: {best_linkage[0]}, Clusters: {best_linkage[1]})')
-plt.show()
+plot_clusters_with_centroids(reduced_data, labels_dbscan, "DBSCAN Clustering")
+plt.figure()
+plot_clusters_with_centroids(reduced_data, labels_agg, "Optimized Agglomerative Clustering")
